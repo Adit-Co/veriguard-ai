@@ -1,0 +1,29 @@
+name = "veriguard-scanner"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+FIREBASE_PROJECT_ID = "YOUR_FIREBASE_PROJECT_ID"
+ALLOWED_ORIGINS = "http://localhost:5173,https://YOUR_FIREBASE_PROJECT_ID.web.app,https://YOUR_FIREBASE_PROJECT_ID.firebaseapp.com"
+RATE_LIMIT_MAX_PER_IP = "30"
+RATE_LIMIT_WINDOW_SECONDS = "60"
+PROVIDER_CONCURRENCY = "4"
+# VGM-06: daftar (bukan satu nilai) karena Hosting menyajikan aplikasi dari web.app dan
+# firebaseapp.com. Samakan dengan hostname publik di ALLOWED_ORIGINS.
+TURNSTILE_HOSTNAMES = "YOUR_FIREBASE_PROJECT_ID.web.app,YOUR_FIREBASE_PROJECT_ID.firebaseapp.com"
+SAFE_BROWSING_TERMS_ACCEPTED = "false"
+
+# P1-3: state bersama antar isolate (batas laju per-IP/uid, izin CAPTCHA, anti-replay token).
+# Tanpa binding ini Worker tetap berjalan dengan memori isolate seperti sebelumnya, jadi
+# menambahkannya adalah perubahan konfigurasi produksi yang harus di-deploy terpisah dan
+# didahului `wrangler tail`/uji. Kelas ScanStateDurableObject diekspor dari src/index.ts.
+[[durable_objects.bindings]]
+name = "SCAN_STATE"
+class_name = "ScanStateDurableObject"
+
+# Migrasi membuat kelas DO saat deploy. Jangan ubah tag migrasi yang sudah pernah dipakai;
+# tambahkan yang baru (v2, v3, ...) bila kelasnya berubah nama.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ScanStateDurableObject"]

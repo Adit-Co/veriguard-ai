@@ -1,0 +1,50 @@
+﻿# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+coverage/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+
+# Credentials and certificates
+*.pem
+*.key
+*.p12
+id_rsa
+id_ed25519
+
+# Logs
+*.log
+npm-debug.log*
+firebase-debug.log
+firestore-debug.log
+
+# Local tooling
+.firebase/
+.wrangler/
+.verification/
+.verify/
+.veriguard/
+.probe/
+.vscode/
+.idea/
+
+# Runtime state
+server/.data/
+
+# Test artifacts
+test-results/
+playwright-report/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+!.dev.vars.example

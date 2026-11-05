@@ -1,0 +1,867 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedEmailUser() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    // WIB tetap (UTC+7, tanpa DST) supaya aturan tidak membutuhkan zona waktu bernama.
+    // int() penting: string(math.floor(...)) menghasilkan "20751.0", bukan "20751".
+    function communityDay() {
+      return int(math.floor((request.time.toMillis() + 25200000) / 86400000));
+    }
+
+    // Partisi umpan harian memakai WITA tetap (UTC+8). Sengaja terpisah dari
+    // communityDay() yang menjadi batas kirim WIB agar penanda lama tetap sah.
+    function communityDailyFeedDay() {
+      return string(int(math.floor((request.time.toMillis() + 28800000) / 86400000)));
+    }
+
+    function isDailyFeedDayId(value) {
+      return value is string && value.matches('^[0-9]{5}$');
+    }
+
+    function isCommunityCategory(value) {
+      return value == 'phishing'
+        || value == 'giveaway'
+        || value == 'marketplace'
+        || value == 'impersonation'
+        || value == 'malware'
+        || value == 'investment_job'
+        || value == 'other';
+    }
+
+    function isUrlHash(value) {
+      return value is string && value.matches('^[0-9a-f]{64}$');
+    }
+
+    function isReportId(value) {
+      return value is string && value.matches('^[0-9a-f]{32}$');
+    }
+
+    function isReporterKey(value) {
+      return value is string && value.matches('^[0-9a-f]{64}$');
+    }
+
+    // Username dinormalisasi klien menjadi huruf kecil, angka, dan garis bawah.
+    // Aturan memakai pola yang sama agar nama yang tidak kanonis tidak pernah
+    // menjadi kunci registry (dua tulisan berbeda untuk satu orang).
+    function isUsernameValue(value) {
+      return value is string && value.matches('^[a-z0-9_]{3,20}$');
+    }
+
+    // Klaim username terjadi saat pendaftaran, yaitu sebelum email terverifikasi,
+    // jadi isVerifiedEmailUser() tidak dapat dipakai di sini. Sesi anonim tetap
+    // ditolak supaya tamu tidak dapat memesan nama.
+    function isRealAccount() {
+      return isSignedIn()
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function usernameRegistryPath(username) {
+      return /databases/$(database)/documents/usernames/$(username);
+    }
+
+    function usernameClaimPath(userId) {
+      return /databases/$(database)/documents/users/$(userId)/username/current;
+    }
+
+    function validUsernameRegistryDocument(username) {
+      let data = request.resource.data;
+      return isUsernameValue(username)
+        && data.keys().hasOnly(['uid', 'createdAt'])
+        && data.uid == request.auth.uid
+        && data.createdAt is string
+        && data.createdAt.size() > 0
+        && data.createdAt.size() <= 40;
+    }
+
+    function validUsernameClaimDocument(userId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly(['username', 'uid', 'createdAt'])
+        && isUsernameValue(data.username)
+        && data.uid == userId
+        && data.createdAt is string
+        && data.createdAt.size() > 0
+        && data.createdAt.size() <= 40;
+    }
+
+    // Allowlist admin manual. Dokumen admins/{uid} hanya dibuat lewat konsol/Admin
+    // SDK; klien tidak dapat menulisnya. Membaca dokumen sendiri diperlukan untuk
+    // memuat status peran, tetapi daftar admin tidak pernah dapat dibaca klien.
+    function adminPath(uid) {
+      return /databases/$(database)/documents/admins/$(uid);
+    }
+
+    function isAdmin() {
+      return isVerifiedEmailUser()
+        && exists(adminPath(request.auth.uid))
+        && get(adminPath(request.auth.uid)).data.active == true
+        && get(adminPath(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isModerationStatus(value) {
+      return value == 'pending'
+        || value == 'review'
+        || value == 'confirmed_malicious'
+        || value == 'inconclusive'
+        || value == 'rejected';
+    }
+
+    // Status akhir tidak dapat dibuka kembali. Perubahan dilakukan eksplisit oleh
+    // moderator melalui aksi UI, bukan otomatis dari kiriman atau hasil pemindai.
+    function isModerationTransition(fromStatus, toStatus) {
+      return (fromStatus == 'pending'
+          && (toStatus == 'review'
+            || toStatus == 'confirmed_malicious'
+            || toStatus == 'inconclusive'
+            || toStatus == 'rejected'))
+        || (fromStatus == 'review'
+          && (toStatus == 'confirmed_malicious'
+            || toStatus == 'inconclusive'
+            || toStatus == 'rejected'));
+    }
+
+    function moderationPath(reportId) {
+      return /databases/$(database)/documents/communityModeration/$(reportId);
+    }
+
+    function moderationPublicPath(reportId) {
+      return /databases/$(database)/documents/communityModerationPublic/$(reportId);
+    }
+
+    function moderationHistoryPath(reportId, eventId) {
+      return /databases/$(database)/documents/communityModeration/$(reportId)/history/$(eventId);
+    }
+
+    function moderationCreateEventId(status) {
+      return 'created_' + status;
+    }
+
+    function moderationTransitionEventId(fromStatus, toStatus) {
+      return 'from_' + fromStatus + '_to_' + toStatus;
+    }
+
+    function validModerationFields(reportId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+        'urlHash',
+        'reportId',
+        'status',
+        'note',
+        'createdAt',
+        'updatedAt',
+        'updatedBy'
+      ])
+        && isReportId(reportId)
+        && data.reportId == reportId
+        && isUrlHash(data.urlHash)
+        && isModerationStatus(data.status)
+        && data.note is string
+        && data.note.size() <= 1000
+        && data.updatedBy == request.auth.uid;
+    }
+
+    // Catatan moderasi, pelaku, dan riwayat tetap privat. Setiap perubahan status
+    // wajib disertai proyeksi status publik dan satu entri audit dengan ID yang
+    // ditentukan transisi. Dengan begitu umpan publik tidak dapat menyimpang dari
+    // keputusan moderator tanpa jejak.
+    function validModerationCreate(reportId) {
+      let data = request.resource.data;
+      return validModerationFields(reportId)
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && exists(
+          /databases/$(database)/documents/communityReports/$(data.urlHash)/reports/$(reportId)
+        )
+        && existsAfter(moderationPublicPath(reportId))
+        && getAfter(moderationPublicPath(reportId)).data.status == data.status
+        && getAfter(moderationPublicPath(reportId)).data.updatedAt == request.time
+        && existsAfter(moderationHistoryPath(reportId, moderationCreateEventId(data.status)));
+    }
+
+    function validModerationUpdate(reportId) {
+      let data = request.resource.data;
+      return validModerationFields(reportId)
+        && data.urlHash == resource.data.urlHash
+        && data.reportId == resource.data.reportId
+        && data.createdAt == resource.data.createdAt
+        && data.updatedAt == request.time
+        && isModerationTransition(resource.data.status, data.status)
+        && existsAfter(moderationPublicPath(reportId))
+        && getAfter(moderationPublicPath(reportId)).data.status == data.status
+        && getAfter(moderationPublicPath(reportId)).data.updatedAt == request.time
+        && existsAfter(
+          moderationHistoryPath(
+            reportId,
+            moderationTransitionEventId(resource.data.status, data.status)
+          )
+        );
+    }
+
+    function validPublicModerationStatus(reportId) {
+      let data = request.resource.data;
+      return isReportId(reportId)
+        && data.keys().hasOnly(['status', 'updatedAt'])
+        && isModerationStatus(data.status)
+        && data.updatedAt == request.time
+        && existsAfter(moderationPath(reportId))
+        && getAfter(moderationPath(reportId)).data.status == data.status
+        && getAfter(moderationPath(reportId)).data.updatedAt == request.time;
+    }
+
+    function validModerationAudit(reportId, eventId) {
+      let data = request.resource.data;
+      return isReportId(reportId)
+        && eventId is string
+        && eventId.size() > 0
+        && eventId.size() <= 128
+        && data.keys().hasOnly([
+          'reportId',
+          'action',
+          'fromStatus',
+          'toStatus',
+          'actorUid',
+          'note',
+          'createdAt'
+        ])
+        && data.reportId == reportId
+        && data.action is string
+        && data.fromStatus is string
+        && data.fromStatus.size() <= 40
+        && isModerationStatus(data.toStatus)
+        && data.actorUid == request.auth.uid
+        && data.note is string
+        && data.note.size() <= 1000
+        && data.createdAt == request.time
+        && existsAfter(moderationPath(reportId))
+        && getAfter(moderationPath(reportId)).data.status == data.toStatus
+        && getAfter(moderationPath(reportId)).data.updatedBy == data.actorUid
+        && getAfter(moderationPath(reportId)).data.updatedAt == data.createdAt
+        && ((data.action == 'created'
+            && data.fromStatus == ''
+            && eventId == moderationCreateEventId(data.toStatus)
+            && !exists(moderationPath(reportId)))
+          || (data.action == 'status_changed'
+            && data.fromStatus != ''
+            && eventId == moderationTransitionEventId(data.fromStatus, data.toStatus)
+            && exists(moderationPath(reportId))
+            && get(moderationPath(reportId)).data.status == data.fromStatus));
+    }
+
+    // Nama pelapor disimpan dalam bentuk tersamar. Aturan tidak dapat menghitung
+    // ulang fungsi penyamaran, jadi yang ditegakkan adalah bentuk aman yang sudah
+    // disanitasi klien: label netral atau berakhiran "(sensor)".
+    function isPublicReporterName(value) {
+      return value is string
+        && value.size() > 0
+        && value.size() <= 80
+        && (value == 'Pengguna'
+          || value.matches('^.{1,74}\\(sensor\\)$'));
+    }
+
+    // Hostname yang disimpan adalah host saja, tanpa skema, port, path, query,
+    // fragment, kredensial, atau spasi. Setiap label dibatasi 63 karakter sesuai
+    // batas DNS dan totalnya 253. Aturan hanya memeriksa bentuk dan konsistensi
+    // antar-dokumen; aturan tidak dapat menghitung SHA-256 sehingga tidak dapat
+    // membuktikan bahwa hostname cocok dengan urlHash. Klien yang dimodifikasi
+    // tetap dapat mengirim hostname lain yang bentuknya sah.
+    function isCommunityHostname(value) {
+      return value is string
+        && value.size() > 0
+        && value.size() <= 253
+        && (value.matches('^[a-z0-9_~!-]{1,63}(\\.[a-z0-9_~!-]{1,63})+$')
+          || value.matches('^\\[[0-9a-f:.]+\\]$'));
+    }
+
+    // URL yang terlihat di umpan hanya boleh berisi skema, host, port opsional,
+    // dan path. Query, fragment, kredensial, dan spasi ditolak. Pola ini sama
+    // dengan isCommunityReportedUrl() di klien. Seperti hostname, aturan tidak
+    // dapat menghitung SHA-256 atau membuktikan bahwa URL cocok dengan urlHash.
+    function isCommunityReportedUrl(value) {
+      return value is string
+        && value.size() > 0
+        && value.size() <= 2048
+        && value.matches(
+          '^https?://([a-z0-9_~!-]{1,63}(\\.[a-z0-9_~!-]{1,63})+|\\[[0-9a-f:.]+\\])(:[0-9]{1,5})?(/[^\\s?#@]*)?$'
+        );
+    }
+
+    // Hostname yang dideklarasikan harus menjadi authority URL tampilannya. Aturan
+    // tetap tidak dapat menghitung SHA-256, jadi urlHash tidak ikut terbuktikan;
+    // yang ditutup adalah laporan yang menampilkan satu situs tetapi melabeli dirinya
+    // dengan host situs lain. Titik pada host dibiarkan sebagai meta karakter (satu
+    // karakter longgar per titik), dan host IPv6 dilewati karena kurung siku akan
+    // dibaca sebagai kelas karakter oleh regex yang disusun ulang.
+    function reportedUrlMatchesDeclaredHost(data) {
+      let host = data.hostname;
+      return !data.keys().hasAll(['reportedUrl'])
+        || host.matches('^\\[[0-9a-f:.]+\\]$')
+        || data.reportedUrl.matches('^https?://' + host + '(:[0-9]{1,5})?(/[^\\s?#@]*)?$');
+    }
+
+    // reportedUrl opsional agar laporan lama yang hanya memiliki hostname tetap
+    // dapat dibaca. Bila salah satu dokumen baru memuatnya, semua dokumen terkait
+    // harus memuat nilai yang sama; tidak ada URL yang disisipkan hanya di feed.
+    function optionalReportedUrlEquals(data, other) {
+      let hasUrl = data.keys().hasAll(['reportedUrl']);
+      let otherHasUrl = other.data.keys().hasAll(['reportedUrl']);
+      return (!hasUrl && !otherHasUrl)
+        || (hasUrl
+          && otherHasUrl
+          && isCommunityReportedUrl(data.reportedUrl)
+          && other.data.reportedUrl == data.reportedUrl);
+    }
+
+    // Laporan publik hanya boleh dibuat bersama penanda harian privat dan kunci
+    // pseudonim per URL. getAfter() memeriksa hasil akhir batch/transaksi sehingga
+    // laporan tanpa penanda, penanda tanpa laporan, atau kombinasi yang tidak saling
+    // cocok ditolak. Tidak ada ownerId atau URL mentah di dokumen publik; URL
+    // tampilan dan hostname adalah nilai yang dideklarasikan klien dan bukan bukti
+    // kebenaran URL.
+    function validPublicReport(urlHash, reportId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+        'reporterKey',
+        'userName',
+        'reportedUrl',
+        'hostname',
+        'category',
+        'reason',
+        'createdAt',
+        'updatedAt'
+      ])
+        && isUrlHash(urlHash)
+        && isReportId(reportId)
+        && isReporterKey(data.reporterKey)
+        && isPublicReporterName(data.userName)
+        && (!data.keys().hasAll(['reportedUrl']) || isCommunityReportedUrl(data.reportedUrl))
+        && isCommunityHostname(data.hostname)
+        && reportedUrlMatchesDeclaredHost(data)
+        && isCommunityCategory(data.category)
+        && data.reason is string
+        && data.reason.size() >= 20
+        && data.reason.size() <= 500
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function validReportBinding(urlHash, reportId) {
+      let data = request.resource.data;
+      let markerPath =
+        /databases/$(database)/documents/users/$(request.auth.uid)/communityReportDays/$(string(communityDay()));
+      let keyPath =
+        /databases/$(database)/documents/users/$(request.auth.uid)/communityReporterKeys/$(urlHash);
+      return existsAfter(markerPath)
+        && existsAfter(keyPath)
+        && getAfter(markerPath).data.ownerId == request.auth.uid
+        && getAfter(markerPath).data.reportId == reportId
+        && getAfter(markerPath).data.urlHash == urlHash
+        && getAfter(markerPath).data.reporterKey == data.reporterKey
+        && getAfter(markerPath).data.category == data.category
+        && getAfter(markerPath).data.createdAt == request.time
+        && getAfter(keyPath).data.ownerId == request.auth.uid
+        && getAfter(keyPath).data.reporterKey == data.reporterKey;
+    }
+
+    function validDailyMarker(userId, dayId) {
+      let data = request.resource.data;
+      let reportPath =
+        /databases/$(database)/documents/communityReports/$(data.urlHash)/reports/$(data.reportId);
+      let keyPath =
+        /databases/$(database)/documents/users/$(userId)/communityReporterKeys/$(data.urlHash);
+      return data.keys().hasOnly([
+        'ownerId',
+        'reportId',
+        'urlHash',
+        'reporterKey',
+        'category',
+        'createdAt'
+      ])
+        && data.ownerId == userId
+        && dayId == string(communityDay())
+        && isReportId(data.reportId)
+        && isUrlHash(data.urlHash)
+        && isReporterKey(data.reporterKey)
+        && isCommunityCategory(data.category)
+        && data.createdAt == request.time
+        && existsAfter(reportPath)
+        && existsAfter(keyPath)
+        && getAfter(reportPath).data.reporterKey == data.reporterKey
+        && getAfter(reportPath).data.category == data.category
+        && getAfter(reportPath).data.createdAt == request.time
+        && getAfter(keyPath).data.ownerId == userId
+        && getAfter(keyPath).data.reporterKey == data.reporterKey;
+    }
+
+    function validReporterKeyDocument(userId, urlHash) {
+      let data = request.resource.data;
+      return data.keys().hasOnly(['ownerId', 'reporterKey', 'createdAt'])
+        && data.ownerId == userId
+        && isUrlHash(urlHash)
+        && isReporterKey(data.reporterKey)
+        && data.createdAt == request.time;
+    }
+
+    // Harus sama dengan COMMUNITY_LATEST_LIMIT di web/src/lib/community/sparkProtocol.ts.
+    function communityLatestLimit() {
+      return 8;
+    }
+
+    function latestEntryPath(reportId) {
+      return /databases/$(database)/documents/communityLatestReports/global/entries/$(reportId);
+    }
+
+    function latestMarkerPath(userId) {
+      return /databases/$(database)/documents/users/$(userId)/communityReportDays/$(string(communityDay()));
+    }
+
+    // Entri umpan hanya boleh dibuat bersama laporan baru hari ini. URL hash
+    // diambil dari penanda privat yang baru dibuat (bukan dari klien feed), lalu
+    // seluruh field publik entri harus identik dengan laporan di partisi URL itu,
+    // termasuk URL tampilan dan hostname. Dengan demikian feed tidak dapat memuat
+    // laporan orang lain, laporan lama, atau nilai yang tidak berasal dari laporan
+    // sumbernya.
+    function validLatestEntryFields(userId, reportId) {
+      let data = request.resource.data;
+      let markerPath = latestMarkerPath(userId);
+      let marker = getAfter(markerPath);
+      let head = getAfter(/databases/$(database)/documents/communityLatestReports/global);
+      let reportPath =
+        /databases/$(database)/documents/communityReports/$(marker.data.urlHash)/reports/$(reportId);
+      return data.keys().hasOnly([
+        'reporterKey',
+        'userName',
+        'reportedUrl',
+        'hostname',
+        'category',
+        'reason',
+        'createdAt'
+      ])
+        && isReportId(reportId)
+        && isReporterKey(data.reporterKey)
+        && isPublicReporterName(data.userName)
+        && optionalReportedUrlEquals(data, getAfter(reportPath))
+        && isCommunityHostname(data.hostname)
+        && isCommunityCategory(data.category)
+        && data.reason is string
+        && data.reason.size() >= 20
+        && data.reason.size() <= 500
+        && data.createdAt == request.time
+        && !exists(latestEntryPath(reportId))
+        && !exists(markerPath)
+        && marker.data.ownerId == userId
+        && marker.data.reportId == reportId
+        && isUrlHash(marker.data.urlHash)
+        && marker.data.reporterKey == data.reporterKey
+        && marker.data.category == data.category
+        && marker.data.createdAt == request.time
+        && !exists(reportPath)
+        && getAfter(reportPath).data.reporterKey == data.reporterKey
+        && getAfter(reportPath).data.userName == data.userName
+        && getAfter(reportPath).data.hostname == data.hostname
+        && getAfter(reportPath).data.category == data.category
+        && getAfter(reportPath).data.reason == data.reason
+        && getAfter(reportPath).data.createdAt == request.time
+        // Entri harus langsung masuk ke depan kepala pada permintaan yang sama;
+        // tidak ada entri yatim yang dapat disisipkan ke feed di kemudian hari.
+        && head.data.entries is list
+        && head.data.entries.size() >= 1
+        && head.data.entries[0] == reportId;
+    }
+
+    function latestEntryIsNewlyCreated(reportId) {
+      return isReportId(reportId)
+        && !exists(latestEntryPath(reportId))
+        && existsAfter(latestEntryPath(reportId));
+    }
+
+    function dailyFeedReportPath(dayId, reportId) {
+      return /databases/$(database)/documents/communityDailyReports/$(dayId)/reports/$(reportId);
+    }
+
+    // Partisi harian hanya menerima entri publik yang dibuat bersama entri umpan
+    // pada permintaan yang sama, dan hanya untuk hari WITA berjalan. Isinya harus
+    // identik dengan entri yang sudah divalidasi aturan umpan, termasuk URL tampilan
+    // dan hostname; tidak ada pseudonim, UID, atau data moderasi tambahan.
+    function validDailyFeedReport(dayId, reportId) {
+      let data = request.resource.data;
+      let entry = getAfter(latestEntryPath(reportId));
+      return isDailyFeedDayId(dayId)
+        && dayId == communityDailyFeedDay()
+        && isReportId(reportId)
+        && data.keys().hasOnly([
+          'userName',
+          'reportedUrl',
+          'hostname',
+          'category',
+          'reason',
+          'createdAt'
+        ])
+        && isPublicReporterName(data.userName)
+        && optionalReportedUrlEquals(data, entry)
+        && isCommunityHostname(data.hostname)
+        && isCommunityCategory(data.category)
+        && data.reason is string
+        && data.reason.size() >= 20
+        && data.reason.size() <= 500
+        && data.createdAt == request.time
+        && !exists(dailyFeedReportPath(dayId, reportId))
+        && latestEntryIsNewlyCreated(reportId)
+        && entry.data.userName == data.userName
+        && entry.data.hostname == data.hostname
+        && entry.data.category == data.category
+        && entry.data.reason == data.reason
+        && entry.data.createdAt == data.createdAt;
+    }
+
+    // Daftar kepala hanya boleh bergeser satu langkah: satu ID baru di depan,
+    // sisanya persis ID lama tanpa yang terakhir. Ukuran tidak pernah melebihi
+    // batas, dan ID baru harus dibuat pada permintaan yang sama.
+    function validLatestHeadShift(oldEntries, newEntries) {
+      let limit = communityLatestLimit();
+      let oldSize = oldEntries.size();
+      let newSize = newEntries.size();
+      return oldEntries is list
+        && newEntries is list
+        && oldSize >= 1
+        && oldSize <= limit
+        && newSize >= 1
+        && newSize <= limit
+        && newSize == (oldSize < limit ? oldSize + 1 : limit)
+        && newEntries[0] is string
+        && newEntries[1] == oldEntries[0]
+        && (oldSize < 2 || newEntries[2] == oldEntries[1])
+        && (oldSize < 3 || newEntries[3] == oldEntries[2])
+        && (oldSize < 4 || newEntries[4] == oldEntries[3])
+        && (oldSize < 5 || newEntries[5] == oldEntries[4])
+        && (oldSize < 6 || newEntries[6] == oldEntries[5])
+        && (oldSize < 7 || newEntries[7] == oldEntries[6]);
+    }
+
+    function validProfileDocument(userId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+        'uid',
+        'email',
+        'displayName',
+        'username',
+        'createdAt',
+        'lastLoginAt'
+      ])
+        && data.uid == userId
+        && data.uid is string
+        && data.uid.size() > 0
+        && data.uid.size() <= 128
+        && (data.email == null
+          || (data.email is string && data.email.size() <= 254))
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 80
+        && (data.username == null || isUsernameValue(data.username))
+        && data.createdAt is string
+        && data.createdAt.size() > 0
+        && data.createdAt.size() <= 40
+        && data.lastLoginAt is string
+        && data.lastLoginAt.size() > 0
+        && data.lastLoginAt.size() <= 40;
+    }
+
+    function validScanDocument(userId, scanId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+        'ownerId',
+        'id',
+        'createdAt',
+        'mode',
+        'input',
+        'displayTarget',
+        'riskScore',
+        'riskLevel',
+        'headline',
+        'summary',
+        'reasons',
+        'patterns',
+        'recommendations',
+        'technical',
+        'meta'
+      ])
+        && data.ownerId == userId
+        && data.id == scanId
+        && data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.createdAt is string
+        && data.createdAt.size() <= 40
+        && (data.mode == 'link' || data.mode == 'message')
+        && data.input is string
+        && data.input.size() <= 4000
+        && data.displayTarget is string
+        && data.displayTarget.size() <= 4000
+        && data.riskScore is number
+        && data.riskScore >= 0
+        && data.riskScore <= 100
+        && (data.riskLevel == 'low' || data.riskLevel == 'medium' || data.riskLevel == 'high')
+        && data.headline is string
+        && data.headline.size() > 0
+        && data.headline.size() <= 200
+        && data.summary is string
+        && data.summary.size() <= 2000
+        && data.reasons is list
+        && data.reasons.size() <= 8
+        && data.patterns is list
+        && data.patterns.size() <= 12
+        && data.recommendations is list
+        && data.recommendations.size() <= 12
+        && data.technical is list
+        && data.technical.size() <= 20
+        && data.meta is map
+        && data.meta.keys().hasOnly([
+          'engineVersion',
+          'signalCount',
+          'inputLength',
+          'aiStatus',
+          'inputStored'
+        ])
+        && data.meta.engineVersion is string
+        && data.meta.engineVersion.size() > 0
+        && data.meta.engineVersion.size() <= 40
+        && data.meta.signalCount is number
+        && data.meta.signalCount >= 0
+        && data.meta.signalCount <= 100
+        && data.meta.inputLength is number
+        && data.meta.inputLength >= 0
+        && data.meta.inputLength <= 4000
+        && (data.meta.aiStatus == 'not_used' || data.meta.aiStatus == 'used')
+        && (data.meta.inputStored == 'full' || data.meta.inputStored == 'redacted');
+    }
+
+    // Data pribadi hanya untuk pemilik dengan email terkonfirmasi. Klaim
+    // email_verified berasal dari token ID Firebase, bukan dari klien.
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isVerifiedEmailUser();
+      allow create: if isOwner(userId) && isVerifiedEmailUser() && validProfileDocument(userId);
+      allow update: if isOwner(userId)
+        && isVerifiedEmailUser()
+        && validProfileDocument(userId)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if false;
+
+      match /scans/{scanId} {
+        allow read, delete: if isOwner(userId) && isVerifiedEmailUser();
+        allow create: if isOwner(userId)
+          && isVerifiedEmailUser()
+          && validScanDocument(userId, scanId);
+        allow update: if isOwner(userId)
+          && isVerifiedEmailUser()
+          && validScanDocument(userId, scanId)
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.mode == resource.data.mode;
+      }
+
+      // Pointer username milik akun. Dibuat sekali bersama entri registry dan tidak
+      // pernah dapat diubah atau dihapus, sehingga pemilik tidak dapat berpindah nama
+      // dan orang lain tidak dapat memindahkan klaim ke akunnya.
+      match /username/{claimId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isRealAccount()
+          && claimId == 'current'
+          && validUsernameClaimDocument(userId)
+          && existsAfter(usernameRegistryPath(request.resource.data.username))
+          && getAfter(usernameRegistryPath(request.resource.data.username)).data.uid == userId;
+        allow update, delete: if false;
+      }
+
+      // Penanda privat satu laporan per akun per hari WIB. Nama dokumen = hari,
+      // sehingga dua transaksi bersamaan bertabrakan di dokumen yang sama. Dokumen
+      // dibuat bersama laporan publik dan kunci pseudonim; tidak ada update/delete.
+      match /communityReportDays/{dayId} {
+        allow get, list: if isOwner(userId) && isVerifiedEmailUser();
+        allow create: if isOwner(userId)
+          && isVerifiedEmailUser()
+          && validDailyMarker(userId, dayId);
+        allow update, delete: if false;
+      }
+
+      // Pseudonim acak per akun per URL. Dibuat sekali, tidak dapat diubah atau
+      // dihapus, sehingga satu akun hanya menyumbang satu pelapor unik per URL
+      // tanpa mengekspos UID. Nilai ini adalah kunci pengelompokan, bukan bukti
+      // identitas; akun lain tetap dapat menyalin nilai yang terlihat di laporan
+      // publik (lihat catatan keterbatasan di dokumentasi).
+      match /communityReporterKeys/{urlHash} {
+        allow get, list: if isOwner(userId) && isVerifiedEmailUser();
+        allow create: if isOwner(userId)
+          && isVerifiedEmailUser()
+          && validReporterKeyDocument(userId, urlHash);
+        allow update, delete: if false;
+      }
+
+      // Jalur Spark lama tidak lagi dipakai. Data lama (nol di produksi saat audit)
+      // tidak dapat dibaca atau ditulis sebagai laporan komunitas.
+      match /communityReports/{reportId} {
+        allow read, write: if false;
+      }
+    }
+
+    // Laporan publik dipartisi per hash URL. Hanya akun dengan email terverifikasi
+    // yang dapat membaca partisi URL yang diminta. Tidak ada aturan recursive
+    // wildcard untuk koleksi "reports", sehingga collection-group query atas semua
+    // URL ditolak. Aturan tidak dapat memeriksa filter query; pemisahan partisi
+    // inilah yang membatasi pembacaan pada satu URL, bukan enumerasi seluruh basis.
+    match /communityReports/{urlHash} {
+      allow read, write: if false;
+
+      match /reports/{reportId} {
+        allow get, list: if isVerifiedEmailUser() && isUrlHash(urlHash);
+        allow create: if isVerifiedEmailUser()
+          && isUrlHash(urlHash)
+          && isReportId(reportId)
+          && validPublicReport(urlHash, reportId)
+          && validReportBinding(urlHash, reportId);
+        allow update, delete: if false;
+      }
+    }
+
+    // Umpan komunitas global berukuran tetap. Klien hanya boleh get() pada kepala
+    // dan entri yang ID-nya ada di kepala; list di kedua jalur ditolak sehingga
+    // tidak ada enumerasi koleksi. Tidak ada recursive wildcard untuk "entries",
+    // jadi collection-group query juga ditolak. Kepala tidak memuat URL, hostname,
+    // UID, email, isi laporan, atau data moderasi; hanya daftar ID acak dan waktu.
+    match /communityLatestReports/global {
+      allow get: if isVerifiedEmailUser();
+      allow list: if false;
+      allow create: if isVerifiedEmailUser()
+        && request.resource.data.keys().hasOnly(['entries', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.entries is list
+        && request.resource.data.entries.size() == 1
+        && latestEntryIsNewlyCreated(request.resource.data.entries[0]);
+      allow update: if isVerifiedEmailUser()
+        && request.resource.data.keys().hasOnly(['entries', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && validLatestHeadShift(
+          resource.data.entries,
+          request.resource.data.entries
+        )
+        && latestEntryIsNewlyCreated(request.resource.data.entries[0]);
+      allow delete: if false;
+
+      match /entries/{reportId} {
+        allow get: if isVerifiedEmailUser() && isReportId(reportId);
+        allow list: if false;
+        allow create: if isVerifiedEmailUser()
+          && validLatestEntryFields(request.auth.uid, reportId);
+        allow update, delete: if false;
+      }
+    }
+
+    // Umpan harian Laporan terbaru, dipartisi per hari WITA. Hanya partisi hari
+    // berjalan yang dapat dibaca; list pada hari lain ditolak sehingga tidak ada
+    // enumerasi arsip. Tidak ada update/delete, jadi histori laporan tidak pernah
+    // dihapus oleh aturan ini. Data lama tetap berada di partisi URL masing-masing.
+    match /communityDailyReports/{dayId} {
+      allow read, write: if false;
+
+      match /reports/{reportId} {
+        allow get: if isVerifiedEmailUser()
+          && isDailyFeedDayId(dayId)
+          && dayId == communityDailyFeedDay()
+          && isReportId(reportId);
+        allow list: if isVerifiedEmailUser()
+          && isDailyFeedDayId(dayId)
+          && dayId == communityDailyFeedDay();
+        allow create: if isVerifiedEmailUser()
+          && validDailyFeedReport(dayId, reportId);
+        allow update, delete: if false;
+      }
+    }
+
+    // Agregat, rate limit, dan audit moderasi hanya untuk backend tepercaya. Jalur
+    // Spark menghitung agregat dari laporan URL-scoped yang dapat dibacanya dan
+    // tidak menulis ke koleksi ini.
+    match /communitySummaries/{urlHash} {
+      allow read, write: if false;
+    }
+
+    match /communityRateLimits/{userId} {
+      allow read, write: if false;
+    }
+
+    match /communityModerationAudit/{auditId} {
+      allow read, write: if false;
+    }
+
+    // Registry keunikan username. Dokumen hanya boleh dibuat, tidak pernah dibaca
+    // oleh bukan pemilik, tidak dapat didaftar, diubah, atau dihapus. Penulisan ke
+    // nama yang sudah dipakai diklasifikasikan sebagai update dan ditolak, sehingga
+    // dua klaim bersamaan tidak mungkin sama-sama berhasil dan klaim lama tidak
+    // pernah dapat dirampas. Aturan ini yang menegakkan keunikan, bukan pemeriksaan
+    // ketersediaan di klien; tidak ada email atau UID yang terbaca pihak lain.
+    match /usernames/{username} {
+      allow get: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow list: if false;
+      allow create: if isRealAccount()
+        && validUsernameRegistryDocument(username)
+        && existsAfter(usernameClaimPath(request.auth.uid))
+        && getAfter(usernameClaimPath(request.auth.uid)).data.username == username;
+      allow update, delete: if false;
+    }
+
+    // Allowlist admin. Klien hanya boleh membaca dokumen perannya sendiri; daftar
+    // admin, pembuatan, perubahan, dan penghapusan selalu ditolak. Provisioning
+    // dilakukan manual lewat Firebase Console dengan UID yang terverifikasi.
+    match /admins/{adminId} {
+      allow get: if isOwner(adminId) && isVerifiedEmailUser();
+      allow list: if false;
+      allow write: if false;
+    }
+
+    // Koleksi privat keputusan moderasi. Hanya admin terverifikasi pada allowlist
+    // yang dapat membaca; laporan publik tidak pernah menjadi dapat diedit.
+    match /communityModeration/{reportId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && validModerationCreate(reportId);
+      allow update: if isAdmin() && validModerationUpdate(reportId);
+      allow delete: if false;
+
+      match /history/{eventId} {
+        allow get, list: if isAdmin();
+        allow create: if isAdmin() && validModerationAudit(reportId, eventId);
+        allow update, delete: if false;
+      }
+    }
+
+    // Proyeksi status minimum untuk umpan publik. Catatan, pelaku, dan audit tidak
+    // pernah disalin ke sini. Hanya admin yang dapat menulis, dan hanya bersama
+    // perubahan dokumen moderasi privat yang cocok pada batch yang sama.
+    match /communityModerationPublic/{reportId} {
+      allow get: if isVerifiedEmailUser() && isReportId(reportId);
+      allow list: if false;
+      allow create, update: if isAdmin() && validPublicModerationStatus(reportId);
+      allow delete: if false;
+    }
+
+    // Admin perlu menelusuri laporan lintas partisi URL untuk antrean moderasi.
+    // Wildcard rekursif ini hanya memberi baca; aturan komunitas yang ada tetap
+    // mengatur pengguna biasa, dan semua penulisan laporan tetap append-only.
+    match /{path=**}/reports/{reportId} {
+      allow get, list: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

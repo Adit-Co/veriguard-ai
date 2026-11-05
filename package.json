@@ -1,0 +1,26 @@
+{
+  "name": "veriguard-ai",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Skrip kenyamanan untuk menjalankan backend lokal dan frontend dari root repo.",
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "dev:web:emulators": "npm --prefix web run dev:emulators",
+    "dev": "npm run dev:server & npm run dev:web",
+    "build:server": "npm --prefix server run build",
+    "build:web": "npm --prefix web run build",
+    "test:server": "npm --prefix server test",
+    "test:web": "npm --prefix web test",
+    "test:functions": "npm --prefix functions test",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-veriguard \"cd functions && npm run test:rules:emulated\"",
+    "test:workers": "npm --prefix workers test",
+    "verify:release": "node scripts/check-release-integrity.mjs",
+    "audit:credentials": "node scripts/audit-credentials.mjs",
+    "check:keys": "node scripts/check-key-rotation.mjs",
+    "test:all": "npm run test:server && npm run test:functions && npm run test:workers && npm run test:web",
+    "build:all": "npm run build:server && npm run build:functions && npm run build:web && npm run build:workers",
+    "build:functions": "npm --prefix functions run build",
+    "build:workers": "npm --prefix workers run build"
+  }
+}

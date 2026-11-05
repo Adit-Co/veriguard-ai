@@ -1,0 +1,26 @@
+# Fixture uji integrasi R1 (VGL-30F) + key ring (VGL-30H). Berkas HANYA dipakai `createTestHarness()`
+# di `test/durableObjectEviction.test.ts` dan tidak pernah di-deploy.
+#
+# Samakan dengan `doProbe.wrangler.toml` (nama binding, nama kelas, migrasi `v1`) lalu tambahkan
+# key ring ber-versi satu. Bentuknya `SCAN_STATE_KEY_V<n>` + `SCAN_STATE_KEY_ACTIVE` karena salt
+# saja (tanpa ring) kini sengaja TIDAK mengaktifkan jalur durable (VGL-30H K-1).
+#
+# Nilainya BUKAN secret produksi: ia teks uji yang dibuat untuk fixture ini, tidak pernah dikirim ke
+# layanan apa pun, dan tidak pernah dipakai di produksi/staging. VGL-30H melarang membuat secret
+# Cloudflare, jadi pengelolaan kunci sungguhan tetap keputusan pemilik; fixture ini hanya memberi
+# runtime lokal materi kunci agar migrasi antar-versi bisa dibuktikan di workerd.
+name = "veriguard-do-probe-durable"
+main = "doProbeWorker.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+SCAN_STATE_KEY_ACTIVE = "v1"
+SCAN_STATE_KEY_V1 = "hanya-untuk-uji-lokal-v1-tidak-pernah-dideploy"
+
+[[durable_objects.bindings]]
+name = "SCAN_STATE"
+class_name = "ScanStateDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ScanStateDurableObject"]

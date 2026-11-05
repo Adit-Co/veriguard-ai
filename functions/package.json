@@ -1,0 +1,29 @@
+{
+  "name": "veriguard-functions",
+  "private": true,
+  "version": "1.0.0",
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "node ../scripts/check-release-integrity.mjs --pre-build && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:rules:emulated": "vitest run test/firestoreRules.test.ts"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0",
+    "firebase-functions": "^7.4.0"
+  },
+  "overrides": {
+    "body-parser": "2.4.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "@types/node": "^22.18.0",
+    "firebase": "^13.1.0",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.5"
+  }
+}

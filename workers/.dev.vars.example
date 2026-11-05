@@ -1,0 +1,15 @@
+# Salin menjadi .dev.vars untuk `wrangler dev`. Jangan commit nilai asli.
+ALLOWED_ORIGINS=http://localhost:5173,https://veriguard-ai-ad35d.web.app,https://veriguard-ai-ad35d.firebaseapp.com
+RATE_LIMIT_MAX_PER_IP=30
+RATE_LIMIT_WINDOW_SECONDS=60
+PROVIDER_CONCURRENCY=4
+
+URLSCAN_API_KEY=
+VIRUSTOTAL_API_KEY=
+OPENPHISH_API_KEY=
+THREATFOX_API_KEY=
+CLOUDFLARE_API_TOKEN=
+CLOUDFLARE_ACCOUNT_ID=
+OTX_API_KEY=
+GOOGLE_SAFE_BROWSING_API_KEY=
+HYBRID_ANALYSIS_API_KEY=

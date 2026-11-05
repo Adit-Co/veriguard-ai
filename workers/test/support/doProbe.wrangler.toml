@@ -1,0 +1,17 @@
+# Konfigurasi uji integrasi Durable Object (VGL-28 R5).
+#
+# Berkas ini hanya dipakai `createTestHarness()` di `test/durableObjectRuntime.test.ts` dan tidak
+# pernah di-deploy. Bentuknya sengaja disamakan dengan `workers/wrangler.toml` produksi — nama
+# binding `SCAN_STATE`, nama kelas `ScanStateDurableObject`, dan migrasi SQLite `v1` — supaya yang
+# diuji adalah jalur registrasi actor yang sama, bukan konfigurasi khusus uji.
+name = "veriguard-do-probe"
+main = "doProbeWorker.ts"
+compatibility_date = "2026-10-01"
+
+[[durable_objects.bindings]]
+name = "SCAN_STATE"
+class_name = "ScanStateDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ScanStateDurableObject"]
